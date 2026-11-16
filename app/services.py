@@ -12,7 +12,7 @@ from pathlib import Path
 
 from flask import current_app
 
-from . import dicom_engine
+from . import dicom_engine, search
 from .dicom_engine import DicomValidationError
 
 # A process-wide lock so concurrent uploads can never derive two different
@@ -228,7 +228,16 @@ def process_batch(conn: sqlite3.Connection, hospital_code: str,
                             batch_id,
                         ),
                     )
-                    batch_file_rows.append((plan, {"id": int(cur.lastrowid)}))
+                    batch_file_id = int(cur.lastrowid)
+                    # Index the new product against the active search config in
+                    # the same transaction: an upload failure rolls these rows
+                    # back too, so failed uploads leave no index behind.  Reused
+                    # products were already indexed when first published.
+                    search.index_dataset_for_active(
+                        conn, hospital_id, batch_file_id, plan.sop_uid,
+                        datasets[plan.ordinal - 1],
+                    )
+                    batch_file_rows.append((plan, {"id": batch_file_id}))
 
                 for plan, row in batch_file_rows:
                     conn.execute(

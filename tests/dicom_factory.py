@@ -6,10 +6,14 @@ same code paths as real hospital exports.
 """
 from __future__ import annotations
 
+import math
 import os
+import warnings
 
 import numpy as np
 import pydicom
+import pydicom.datadict
+from pydicom.dataelem import DataElement
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import (
     CTImageStorage,
@@ -26,6 +30,53 @@ TS_BY_UID = {
     "1.2.840.10008.1.2.2": ExplicitVRBigEndian,
 }
 
+# Keyword -> (tag, VR) for the numeric search fixtures used by search tests.
+# Resolved through pydicom's own dictionary so the test data cannot drift from
+# the tag numbers the application validates against.
+_NUMERIC_TAG_INFO = {
+    keyword: (
+        pydicom.datadict.tag_for_keyword(keyword),
+        pydicom.datadict.dictionary_VR(pydicom.datadict.tag_for_keyword(keyword)),
+    )
+    for keyword in (
+        "SliceThickness",
+        "KVP",
+        "XRayTubeCurrent",
+        "Exposure",
+        "Rows",
+    )
+}
+
+
+def _apply_numeric_tags(ds: Dataset, numeric_tags: dict | None,
+                        invalid_tags: dict | None) -> None:
+    """Write ordinary numeric values and deliberately invalid ones.
+
+    ``invalid_tags`` maps a keyword to one of the reason scenarios:
+    ``"empty"``, ``"multi"``, ``"nan"``, ``"inf"`` or ``"non_numeric"``.
+    The non-numeric case bypasses pydicom validation on purpose, simulating a
+    malformed file produced by another system.
+    """
+    for keyword, value in (numeric_tags or {}).items():
+        setattr(ds, keyword, value)
+
+    for keyword, scenario in (invalid_tags or {}).items():
+        tag, vr = _NUMERIC_TAG_INFO[keyword]
+        if scenario == "empty":
+            ds.add_new(tag, vr, None)
+        elif scenario == "multi":
+            ds.add_new(tag, vr, [1, 2] if vr == "IS" else [1.0, 2.0])
+        elif scenario == "nan":
+            ds.add_new(tag, vr, float("nan"))
+        elif scenario == "inf":
+            ds.add_new(tag, vr, math.inf)
+        elif scenario == "non_numeric":
+            element = DataElement(tag, vr, "1")
+            element._value = "abc"
+            ds[tag] = element
+        else:
+            raise ValueError(f"unknown invalid tag scenario {scenario!r}")
+
 
 def make_ct_file(
     path: str,
@@ -40,6 +91,8 @@ def make_ct_file(
     pixel_seed: int = 7,
     rows: int = 16,
     cols: int = 16,
+    numeric_tags: dict | None = None,
+    invalid_tags: dict | None = None,
 ) -> str:
     """Write one synthetic uncompressed CT image and return its path."""
     sop_uid = sop_uid or generate_uid()
@@ -111,8 +164,14 @@ def make_ct_file(
     # Class-like UIDs that must remain unchanged.
     ds.SOPClassesSupported = [CTImageStorage]
 
+    _apply_numeric_tags(ds, numeric_tags, invalid_tags)
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    ds.save_as(path, write_like_original=False)
+    with warnings.catch_warnings():
+        # NaN/inf DS values and bypassed non-numeric strings emit pydicom
+        # warnings; the tests intentionally exercise those cases.
+        warnings.simplefilter("ignore")
+        ds.save_as(path, write_like_original=False)
     return path
 
 

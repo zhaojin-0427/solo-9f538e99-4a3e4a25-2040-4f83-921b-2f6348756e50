@@ -7,6 +7,9 @@ uid_mapping     : deterministic old-UID -> new-UID mapping, namespaced by hospit
 batch           : upload batch registry; only ``published`` batches are usable
 batch_file      : per-(hospital, SOP UID) canonical converted product record
 batch_item      : one row per file that made up a specific batch
+search_config   : versions of the numeric-tag search configuration (one active)
+search_index    : per-config-version product index rows (one row per matched SOP)
+search_exclusion: per-config-version products that failed a field, with reasons
 """
 from __future__ import annotations
 
@@ -68,6 +71,59 @@ CREATE TABLE IF NOT EXISTS batch_item (
 CREATE INDEX IF NOT EXISTS idx_mapping_hospital ON uid_mapping(hospital_id);
 CREATE INDEX IF NOT EXISTS idx_batch_hospital   ON batch(hospital_id);
 CREATE INDEX IF NOT EXISTS idx_item_batch       ON batch_item(batch_id);
+
+-- Numeric-tag search configuration versions.  Exactly one row may be active
+-- (status='active') at a time; building/superseded/failed versions are kept
+-- for history and for restart retry.
+CREATE TABLE IF NOT EXISTS search_config (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- JSON list of 1..3 standard top-level numeric tag keywords.
+    fields_json      TEXT NOT NULL,
+    status           TEXT NOT NULL CHECK (status IN
+                         ('building', 'active', 'superseded', 'failed')),
+    total_products   INTEGER NOT NULL DEFAULT 0,
+    indexed_products INTEGER NOT NULL DEFAULT 0,
+    excluded_count   INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    activated_at     TEXT
+);
+
+-- One row per (config version, hospital, SOP) whose configured fields all hold
+-- a single finite numeric value.  Dedup key is the SOP inside one hospital.
+CREATE TABLE IF NOT EXISTS search_index (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_id           INTEGER NOT NULL REFERENCES search_config(id),
+    hospital_id         INTEGER NOT NULL REFERENCES hospital(id),
+    batch_file_id       INTEGER NOT NULL REFERENCES batch_file(id),
+    sop_uid_old         TEXT NOT NULL,
+    -- Stored as REAL so closed-interval comparisons are numeric, not textual.
+    value_1             REAL,
+    value_2             REAL,
+    value_3             REAL,
+    UNIQUE (config_id, hospital_id, sop_uid_old)
+);
+
+-- Products that could not enter the index for a given config version, each
+-- row naming the first offending field and a machine-readable reason.
+CREATE TABLE IF NOT EXISTS search_exclusion (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_id           INTEGER NOT NULL REFERENCES search_config(id),
+    hospital_id         INTEGER NOT NULL REFERENCES hospital(id),
+    batch_file_id       INTEGER NOT NULL REFERENCES batch_file(id),
+    sop_uid_old         TEXT NOT NULL,
+    field_keyword       TEXT NOT NULL,
+    reason              TEXT NOT NULL CHECK (reason IN
+                         ('missing', 'empty', 'non_numeric', 'not_finite',
+                          'multi_value', 'read_error')),
+    detail              TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (config_id, batch_file_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_config_status ON search_config(status);
+CREATE INDEX IF NOT EXISTS idx_search_index_lookup  ON search_index(config_id, hospital_id);
+CREATE INDEX IF NOT EXISTS idx_search_excl_config   ON search_exclusion(config_id);
 """
 
 

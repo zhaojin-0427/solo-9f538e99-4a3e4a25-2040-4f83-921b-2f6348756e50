@@ -34,7 +34,12 @@
   </style>
 </head>
 <body>
-<header><a href="{{ url_for('main.index') }}">研究影像库 · DICOM UID 隔离转换平台</a></header>
+<header>
+  <a href="{{ url_for('main.index') }}">研究影像库 · DICOM UID 隔离转换平台</a>
+  <span style="float:right">
+    <a href="{{ url_for('main.search_page') }}">影像检索 / 检索配置</a>
+  </span>
+</header>
 <main>
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}

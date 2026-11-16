@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}影像检索 · 研究影像库{% endblock %}
+{% block content %}
+<section class="card">
+  <h2 style="margin-top:0">检索字段配置（1～{{ max_fields }} 个顶层标准数值标签）</h2>
+  <form method="post" action="{{ url_for('main.search_config_create') }}">
+    <p class="muted">
+      仅接受标准字典中的顶层数值型标签（VR 为 DS/IS/FL/FD/SS/US/SL/UL），例如
+      <code>SliceThickness</code>、<code>KVP</code>、<code>XRayTubeCurrent</code>。
+      提交后立即触发全量重建；重建期间旧配置继续提供检索，全部已提交成品处理完后
+      新配置与索引整体切换。
+    </p>
+    <div id="field-rows">
+      {% for i in range(max_fields) %}
+      <p>
+        <label>字段 {{ i + 1 }}：
+          <input type="text" name="fields" list="numeric-tags"
+                 placeholder="{% if i == 0 %}SliceThickness（必填）{% else %}可选，留空跳过{% endif %}"
+                 {% if i == 0 %}required{% endif %}>
+        </label>
+      </p>
+      {% endfor %}
+    </div>
+    <datalist id="numeric-tags">
+      <option value="SliceThickness">
+      <option value="KVP">
+      <option value="XRayTubeCurrent">
+      <option value="Exposure">
+      <option value="Rows">
+      <option value="Columns">
+      <option value="ReconstructionDiameter">
+      <option value="GantryDetectorTilt">
+      <option value="TableHeight">
+      <option value="XRayTubeCurrentInuA">
+    </datalist>
+    <button type="submit">保存并重建索引</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2 style="margin-top:0">配置版本与重建状态</h2>
+  {% if configs %}
+  <table>
+    <thead>
+      <tr><th>版本</th><th>字段</th><th>状态</th><th>已索引 / 排除 / 成品总数</th><th>时间 / 错误</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+    {% for c in configs %}
+      <tr {% if c.id == (active.id if active else none) %}style="background:#dafbe1"{% endif %}>
+        <td>#{{ c.id }}</td>
+        <td><code>{{ c.fields_json|from_json|join(", ") }}</code></td>
+        <td><span class="kind">
+          {% if c.status == 'active' %}生效中
+          {% elif c.status == 'building' %}重建中
+          {% elif c.status == 'superseded' %}已被取代
+          {% elif c.status == 'failed' %}重建失败{% endif %}
+        </span></td>
+        <td>{{ c.indexed_products }} / {{ c.excluded_count }} / {{ c.total_products or '—' }}</td>
+        <td style="max-width:280px">
+          {{ c.activated_at or c.created_at }}
+          {% if c.last_error %}<div class="flash error" style="margin:6px 0 0">{{ c.last_error }}</div>{% endif %}
+        </td>
+        <td>
+          <a class="btn secondary" href="{{ url_for('main.search_page', config=c.id) }}">详情</a>
+          {% if c.status in ('failed', 'building') and not (active and active.id > c.id) %}
+          <form method="post" style="display:inline"
+                action="{{ url_for('main.search_config_retry', config_id=c.id) }}">
+            <button type="submit" class="btn secondary">重试重建</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">尚无检索配置。提交上方表单后，系统将为全部已发布成品建立索引。</p>
+  {% endif %}
+</section>
+
+{% if selected %}
+<section class="card">
+  <h2 style="margin-top:0">版本 #{{ selected.id }} 不命中成品说明（前 {{ exclusions|length }} 条）</h2>
+  <p class="muted">
+    标签缺失、空值、非数值、非有限数值（NaN/无穷大）或多值的成品不会进入索引，
+    下表逐条给出首个不满足字段与原因；读取失败的成品同样列明。
+  </p>
+  {% if exclusions %}
+  <table>
+    <thead><tr><th>医院</th><th>原 SOP Instance UID</th><th>字段</th><th>原因</th></tr></thead>
+    <tbody>
+    {% for e in exclusions %}
+      <tr>
+        <td><code>{{ e.hospital_code }}</code></td>
+        <td><code>{{ e.sop_uid_old }}</code></td>
+        <td><code>{{ e.field_keyword }}</code></td>
+        <td>{{ reason_labels.get(e.reason, e.reason) }}{% if e.detail and e.reason == 'read_error' %}：{{ e.detail }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">该版本没有排除记录（或尚未完成重建）。</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2 style="margin-top:0">按医院与数值闭区间检索</h2>
+  {% if not active %}
+    <p class="flash error" style="margin-bottom:0">
+      当前没有生效中的检索配置。请先提交配置并等待重建完成；重建期间此页保留旧表单且不接受旧版本检索。
+    </p>
+  {% else %}
+  <p class="muted">
+    生效配置版本 <strong>#{{ active.id }}</strong>，字段：
+    {% set active_fields = active.fields_json|from_json %}
+    {% for f in active_fields %}<code>{{ f }}</code>{% if not loop.last %}、{% endif %}{% endfor %}。
+    每个字段可只填下限或只填上限（开区间端），也可两端都填构成闭区间；按 SOP 去重。
+  </p>
+  <form method="get" action="{{ url_for('main.search_page') }}">
+    <input type="hidden" name="v" value="{{ active.id }}">
+    <input type="hidden" name="do" value="1">
+    <p>
+      <label><strong>医院</strong>
+        <select name="hospital" required>
+          <option value="">请选择医院</option>
+          {% for h in hospitals %}
+          <option value="{{ h.code }}" {% if h.code == hospital_code %}selected{% endif %}>{{ h.code }}（{{ h.batch_count }} 批）</option>
+          {% endfor %}
+        </select>
+      </label>
+    </p>
+    <table>
+      <thead><tr><th>字段</th><th>下限（含）</th><th>上限（含）</th></tr></thead>
+      <tbody>
+      {% for f in active_fields %}
+        <tr>
+          <td><code>{{ f }}</code></td>
+          <td><input type="text" name="min_{{ loop.index0 }}" inputmode="decimal"
+                     value="{{ request.args.get('min_' ~ loop.index0, '') }}"></td>
+          <td><input type="text" name="max_{{ loop.index0 }}" inputmode="decimal"
+                     value="{{ request.args.get('max_' ~ loop.index0, '') }}"></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p style="margin-bottom:0"><button type="submit">检索</button></p>
+  </form>
+  {% endif %}
+</section>
+
+{% if query_error %}
+<div class="flash error">{{ query_error }}</div>
+{% endif %}
+
+{% if results %}
+<section class="card">
+  <h2 style="margin-top:0">检索结果（医院 {{ results.hospital_code }}，{{ results.rows|length }} 个 SOP）</h2>
+  {% if results.rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>原 SOP Instance UID</th>
+        {% for f in results.fields %}<th>{{ f }}</th>{% endfor %}
+        <th>原始文件名</th><th>成品链接</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in results.rows %}
+      <tr>
+        <td><code>{{ r.sop_uid_old }}</code></td>
+        <td>{{ r.value_1 if r.value_1 is not none else '' }}</td>
+        {% if results.fields|length > 1 %}<td>{{ r.value_2 if r.value_2 is not none else '' }}</td>{% endif %}
+        {% if results.fields|length > 2 %}<td>{{ r.value_3 if r.value_3 is not none else '' }}</td>{% endif %}
+        <td>{{ r.original_filename }}</td>
+        <td><a class="btn secondary"
+               href="{{ url_for('main.product_download', batch_file_id=r.batch_file_id) }}">下载成品</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted" style="margin-bottom:0">没有命中任何成品。</p>
+  {% endif %}
+</section>
+{% endif %}
+<p><a class="btn secondary" href="{{ url_for('main.index') }}">返回首页</a></p>
+{% endblock %}

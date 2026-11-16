@@ -1,11 +1,12 @@
 """Flask application factory."""
 from __future__ import annotations
 
+import json
 import os
 
 from flask import Flask
 
-from . import config
+from . import config, search
 from .db import init_app
 from .routes import bp
 from .services import cleanup_staging
@@ -28,6 +29,7 @@ def create_app(config_overrides: dict | None = None) -> Flask:
     app.config["MAX_CONTENT_LENGTH"] = config.MAX_CONTENT_LENGTH
     # Flash messages need sessions; the key can be overridden for deployment.
     app.secret_key = os.environ.get("DICOM_SECRET_KEY", "dicom-gateway-dev-secret")
+    app.jinja_env.filters["from_json"] = json.loads
     if config_overrides:
         app.config.update(config_overrides)
 
@@ -40,4 +42,7 @@ def create_app(config_overrides: dict | None = None) -> Flask:
         app.logger.info("removed interrupted staging batches: %s", ", ".join(orphans))
 
     app.register_blueprint(bp)
+    # The background rebuild worker scans published products without blocking
+    # uploads; a single process-wide thread is enough (1 gunicorn worker).
+    search.start_worker(app)
     return app
